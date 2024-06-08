@@ -1,6 +1,7 @@
 wandb/
 *debug*
 debugs/
+env/
 outputs/
 samples/
 __pycache__/
@@ -10,12 +11,16 @@ ossutil_output/
 scripts/*
 !scripts/animate.py
 
+*.pth
+*.pt
+*.mp4
 *.ipynb
 *.safetensors
 *.ckpt
+*.png
+*.jpg
 
 models/*
-!models/StableDiffusion/
 models/StableDiffusion/*
 !models/StableDiffusion/*.txt
 !models/Motion_Module/

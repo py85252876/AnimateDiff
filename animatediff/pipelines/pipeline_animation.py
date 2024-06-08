@@ -37,7 +37,8 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 @dataclass
 class AnimationPipelineOutput(BaseOutput):
     videos: Union[torch.Tensor, np.ndarray]
-
+    predx_0: Union[torch.Tensor, np.ndarray]
+    predx_t: Union[torch.Tensor, np.ndarray]
 
 class AnimationPipeline(DiffusionPipeline):
     _optional_components = []
@@ -394,8 +395,11 @@ class AnimationPipeline(DiffusionPipeline):
 
         # Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        predx_t = []
+        predx_0 = []
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
+                
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if do_classifier_free_guidance else latents
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
@@ -444,14 +448,18 @@ class AnimationPipeline(DiffusionPipeline):
                     noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
-
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample #x_t
+                predx_t.append(latents.squeeze(0).detach().clone())
+                predx_0.append(self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).pred_original_sample.squeeze(0).detach().clone()) #x_0
                 # call the callback, if provided
                 if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
-
+        predx_0 = torch.stack(predx_0, dim=0)
+        predx_t = torch.stack(predx_t, dim=0)
+        # print(predx_0.shape)
+        # print(predx_t.shape)
         # Post-processing
         video = self.decode_latents(latents)
 
@@ -462,4 +470,4 @@ class AnimationPipeline(DiffusionPipeline):
         if not return_dict:
             return video
 
-        return AnimationPipelineOutput(videos=video)
+        return AnimationPipelineOutput(videos=video, predx_0=predx_0, predx_t=predx_t)

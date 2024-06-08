@@ -27,6 +27,16 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 
+def find_video_files(directory,eval_list=[]):
+    video_files = []
+    for root, dirs, files in os.walk(directory):
+        files.sort()
+        for file in files:
+            if file.endswith(".png") and int(file.split('.')[0]) not in eval_list:
+                full_path = os.path.join(root, file)
+                video_files.append(full_path)
+    return video_files
+
 
 @torch.no_grad()
 def main(args):
@@ -56,6 +66,7 @@ def main(args):
 
         # load controlnet model
         controlnet = controlnet_images = None
+
         if model_config.get("controlnet_path", "") != "":
             assert model_config.get("controlnet_images", "") != ""
             assert model_config.get("controlnet_config", "") != ""
@@ -73,7 +84,58 @@ def main(args):
             controlnet.load_state_dict(controlnet_state_dict)
             controlnet.cuda()
 
-            image_paths = model_config.controlnet_images
+
+        # set xformers
+        if is_xformers_available() and (not args.without_xformers):
+            unet.enable_xformers_memory_efficient_attention()
+            if controlnet is not None: controlnet.enable_xformers_memory_efficient_attention()
+
+        pipeline = AnimationPipeline(
+            vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
+            controlnet=controlnet,
+            scheduler=DDIMScheduler(**OmegaConf.to_container(inference_config.noise_scheduler_kwargs)),
+        ).to("cuda")
+
+        pipeline = load_weights(
+            pipeline,
+            # motion module
+            motion_module_path         = model_config.get("motion_module", ""),
+            motion_module_lora_configs = model_config.get("motion_module_lora_configs", []),
+            # domain adapter
+            adapter_lora_path          = model_config.get("adapter_lora_path", ""),
+            adapter_lora_scale         = model_config.get("adapter_lora_scale", 1.0),
+            # image layers
+            dreambooth_model_path      = model_config.get("dreambooth_path", ""),
+            lora_model_path            = model_config.get("lora_model_path", ""),
+            lora_alpha                 = model_config.get("lora_alpha", 0.8),
+        ).to("cuda")
+
+        # prompts      = model_config.prompt
+        prompts = []
+        # print(model_config.get("file_path",""))
+
+        print(f"load prompt from {model_config.get('file_path','')}")
+        print(f"data save to {model_config.get('save_predx_0','')} and {model_config.get('save_predx_t','')}")
+        print(f"img save to {savedir}")
+        with open(model_config.get("file_path",""), 'r', encoding='utf-8') as file:
+            for line in file:
+                prompts.append(line.strip())
+
+
+        n_prompts    = list(model_config.n_prompt) * len(prompts) if len(model_config.n_prompt) == 1 else model_config.n_prompt
+        
+        random_seeds = model_config.get("seed", [-1])
+        random_seeds = [random_seeds] if isinstance(random_seeds, int) else list(random_seeds)
+        random_seeds = random_seeds * len(prompts) if len(random_seeds) == 1 else random_seeds
+        
+        config[model_idx].random_seed = []
+        total_predx_0 = []
+        total_predx_t = []
+        image_list = find_video_files(model_config.get("controlnet_images", ""))
+        for prompt_idx, (prompt, n_prompt, random_seed) in enumerate(zip(prompts, n_prompts, random_seeds)):
+            
+            # image_paths = model_config.controlnet_images
+            image_paths = image_list[prompt_idx]
             if isinstance(image_paths, str): image_paths = [image_paths]
 
             print(f"controlnet image paths:")
@@ -111,41 +173,6 @@ def main(args):
                 controlnet_images = vae.encode(controlnet_images * 2. - 1.).latent_dist.sample() * 0.18215
                 controlnet_images = rearrange(controlnet_images, "(b f) c h w -> b c f h w", f=num_controlnet_images)
 
-        # set xformers
-        if is_xformers_available() and (not args.without_xformers):
-            unet.enable_xformers_memory_efficient_attention()
-            if controlnet is not None: controlnet.enable_xformers_memory_efficient_attention()
-
-        pipeline = AnimationPipeline(
-            vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
-            controlnet=controlnet,
-            scheduler=DDIMScheduler(**OmegaConf.to_container(inference_config.noise_scheduler_kwargs)),
-        ).to("cuda")
-
-        pipeline = load_weights(
-            pipeline,
-            # motion module
-            motion_module_path         = model_config.get("motion_module", ""),
-            motion_module_lora_configs = model_config.get("motion_module_lora_configs", []),
-            # domain adapter
-            adapter_lora_path          = model_config.get("adapter_lora_path", ""),
-            adapter_lora_scale         = model_config.get("adapter_lora_scale", 1.0),
-            # image layers
-            dreambooth_model_path      = model_config.get("dreambooth_path", ""),
-            lora_model_path            = model_config.get("lora_model_path", ""),
-            lora_alpha                 = model_config.get("lora_alpha", 0.8),
-        ).to("cuda")
-
-        prompts      = model_config.prompt
-        n_prompts    = list(model_config.n_prompt) * len(prompts) if len(model_config.n_prompt) == 1 else model_config.n_prompt
-        
-        random_seeds = model_config.get("seed", [-1])
-        random_seeds = [random_seeds] if isinstance(random_seeds, int) else list(random_seeds)
-        random_seeds = random_seeds * len(prompts) if len(random_seeds) == 1 else random_seeds
-        
-        config[model_idx].random_seed = []
-        for prompt_idx, (prompt, n_prompt, random_seed) in enumerate(zip(prompts, n_prompts, random_seeds)):
-            
             # manually set random seed for reproduction
             if random_seed != -1: torch.manual_seed(random_seed)
             else: torch.seed()
@@ -153,7 +180,7 @@ def main(args):
             
             print(f"current seed: {torch.initial_seed()}")
             print(f"sampling {prompt} ...")
-            sample = pipeline(
+            output = pipeline(
                 prompt,
                 negative_prompt     = n_prompt,
                 num_inference_steps = model_config.steps,
@@ -164,19 +191,24 @@ def main(args):
 
                 controlnet_images = controlnet_images,
                 controlnet_image_index = model_config.get("controlnet_image_indexs", [0]),
-            ).videos
+            )
+            sample = output.videos
             samples.append(sample)
-
-            prompt = "-".join((prompt.replace("/", "").split(" ")[:10]))
-            save_videos_grid(sample, f"{savedir}/sample/{sample_idx}-{prompt}.gif")
-            print(f"save to {savedir}/sample/{prompt}.gif")
+            total_predx_0.append(output.predx_0.detach().cpu())
+            total_predx_t.append(output.predx_t.detach().cpu())
+            # prompt = "-".join((prompt.replace("/", "").split(" ")[:10]))
+            save_videos_grid(sample, f"{savedir}/sample/{sample_idx}.mp4")
+            print(f"save to {savedir}/sample/{prompt}.mp4")
             
             sample_idx += 1
+    total_predx_0 = torch.stack(total_predx_0,dim=0)
+    total_predx_t = torch.stack(total_predx_t,dim=0)
+    torch.save(total_predx_0,model_config.get("save_predx_0",""))
+    torch.save(total_predx_t,model_config.get("save_predx_t",""))
+    # samples = torch.concat(samples)
+    # save_videos_grid(samples, f"{savedir}/sample.mp4", n_rows=4)
 
-    samples = torch.concat(samples)
-    save_videos_grid(samples, f"{savedir}/sample.gif", n_rows=4)
-
-    OmegaConf.save(config, f"{savedir}/config.yaml")
+    # OmegaConf.save(config, f"{savedir}/config.yaml")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-name: animatediff
+prefix: /scratch/trv3px/video_detection/AnimateDiff/env
 channels:
   - pytorch
   - nvidia
